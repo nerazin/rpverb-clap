@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(RPVerbReconstruction VERSION 0.1.0 DESCRIPTION "RPVerb Reconstruction CLAP plugin" LANGUAGES CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +20,8 @@ target_include_directories(rpverb_reconstruction PRIVATE ${INCLUDES})
 target_compile_options(rpverb_reconstruction PRIVATE -O2 -Wall -Wextra -fvisibility=hidden ${EXACT_FLOAT_FLAGS})
 
 if(APPLE)
+    target_sources(rpverb_reconstruction PRIVATE src/gui_mac.mm)
+    target_link_libraries(rpverb_reconstruction PRIVATE "-framework Cocoa")
     set_target_properties(rpverb_reconstruction PROPERTIES
         BUNDLE TRUE
         BUNDLE_EXTENSION clap
@@ -40,7 +45,12 @@ if(BUILD_TESTING)
     target_include_directories(rpverb_host_test PRIVATE ${INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_options(rpverb_host_test PRIVATE -O2 -Wall -Wextra ${EXACT_FLOAT_FLAGS})
     target_link_libraries(rpverb_host_test PRIVATE ${CMAKE_DL_LIBS})
-    if(APPLE)
+    if(APPLE)  # renders the GUI to a PNG for review: rpverb_gui_snapshot <binary> out.png [routed]
+        add_executable(rpverb_gui_snapshot tests/gui_snapshot.mm)
+        target_include_directories(rpverb_gui_snapshot PRIVATE ${INCLUDES})
+        target_link_libraries(rpverb_gui_snapshot PRIVATE "-framework Cocoa" ${CMAKE_DL_LIBS})
+        add_test(NAME gui_snapshot COMMAND rpverb_gui_snapshot $<TARGET_BUNDLE_DIR:rpverb_reconstruction>/Contents/MacOS/RPVerbReconstruction
+                 ${CMAKE_CURRENT_BINARY_DIR}/gui.png routed)
         add_test(NAME host_smoke COMMAND rpverb_host_test $<TARGET_BUNDLE_DIR:rpverb_reconstruction>/Contents/MacOS/RPVerbReconstruction)
     else()
         add_test(NAME host_smoke COMMAND rpverb_host_test $<TARGET_FILE:rpverb_reconstruction>)

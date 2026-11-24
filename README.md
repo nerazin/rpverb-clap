@@ -5,6 +5,19 @@ ported by hand from the Rack Extension's x86-64 code, operation by operation, an
 the original binary running under Rosetta. Private project; not affiliated with Rob Papen or
 Reason Studios.
 
+## Panel
+
+On macOS the plugin has a small GUI laid out along the signal flow. The top row is the main path,
+left to right: IN, Ensemble, Distortion, EQ (pre), Pre-Delay, the three reverbs, EQ (post), the
+envelope's gain, Dry/Wet, OUT. The bottom row holds the side branches: Early and Late reflections
+and the Envelope. Their wires go to whichever point the routing switches select, and the route not
+taken is dashed. Above the main row run the dry path and, with Ensemble on "Direct + Reverb", the
+ensemble's direct path. The EQ panel moves between its pre and post slots with Post Audio. The
+reverb shows which of its three parallel reverbs run (HQ Mode off drops the second), and the
+header shows the device's state: running, muted while clearing after a reset, asleep on silent
+input, off, or bypass. Drag knobs vertically (Shift for fine), double-click for the default,
+scroll to nudge. `rpverb_gui_snapshot <binary> out.png [routed]` renders it to a PNG.
+
 ## Controls
 
 Every panel control is a parameter, with the original property tag as its CLAP id:
@@ -48,6 +61,7 @@ cable does in Reason. Other parameters are automatable but not modulatable.
 | Same golden test, native arm64 build | different hashes: macOS libm (powf, sin, cos, log10) differs between arm64 and x86-64 |
 | Plugin output against a direct device run (`tests/host_smoke.cpp`), random block sizes and parameter moves | 0 samples differ |
 | Remote-control pages (`tests/host_smoke.cpp`): ids valid, every parameter reachable | pass |
+| GUI opens through the CLAP gui extension and renders (`gui_snapshot` test) | pass |
 | Planted 1-ulp bug | caught by the function and device checks |
 
 The reference was the original x86-64 image driven by a fake host, not Reason itself.
@@ -62,7 +76,7 @@ The reference was the original x86-64 image driven by a fake host, not Reason it
   neither in patches.
 - What Reason sends on the first batch after creating a device (modelled as every property
   changing) and what an unconnected input buffer holds (modelled as whatever the host passes).
-- Not opened in a DAW yet.
+- Not opened in a DAW yet: GUI gestures and automation recording in a host are untested.
 
 ## Build
 

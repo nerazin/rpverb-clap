@@ -1,6 +1,7 @@
 // RP-Verb CLAP parameters: one per panel control, with the original property tag as the CLAP id.
 #pragma once
 #include <cstdint>
+#include <cstdio>
 
 namespace rpverb_clap {
 
@@ -97,6 +98,20 @@ inline const RemotePage kRemotePages[] = {
     {"Back Panel", {kIdPower, kIdSideInput, 100, 105, kIdReset, 8, kNone, kNone}},
 };
 constexpr int kRemotePageCount = int(sizeof kRemotePages / sizeof kRemotePages[0]);
+
+// Display text: the step's name, or percent for knobs (the original's display units are not recorded yet).
+inline bool formatValue(int index, double v, char* out, unsigned size) {
+    if (index < 0 || !size) return false;
+    const ParamDef& d = kParams[index];
+    if (d.steps) {
+        const int k = int(v + 0.5);
+        if (k < 0 || k >= d.steps) return false;
+        snprintf(out, size, "%s", d.labels[k]);
+    } else {
+        snprintf(out, size, "%.1f %%", v * 100.0);
+    }
+    return true;
+}
 
 inline int paramIndex(uint32_t id) {
     for (int i = 0; i < kParamCount; i++) if (kParams[i].id == id) return i;

@@ -11,6 +11,7 @@
 
 #include <clap/clap.h>
 
+#include "gui.hpp"
 #include "params.hpp"
 #include "rpverb_device.hpp"
 
@@ -27,7 +28,31 @@ const clap_plugin_descriptor_t kDescriptor = {
     CLAP_VERSION_INIT, "com.rpverb-reconstruction.rpverb", "RPVerb Reconstruction", "RPVerb Reconstruction Project",
     "", "", "", "0.1.0", "Reverb reconstructed from the RPVerb 1.0.7 Rack Extension", kFeatures};
 
-struct Plugin {
+// GUI -> host: gestures and values, one producer (main thread), one consumer (process or flush)
+struct UiEvent { uint16_t type; int index; double value; };
+class UiQueue {
+public:
+    bool push(const UiEvent& e) {
+        const uint32_t w = write_.load(std::memory_order_relaxed);
+        if (w - read_.load(std::memory_order_acquire) >= kSize) return false;
+        items_[w % kSize] = e;
+        write_.store(w + 1, std::memory_order_release);
+        return true;
+    }
+    bool pop(UiEvent& e) {
+        const uint32_t r = read_.load(std::memory_order_relaxed);
+        if (r == write_.load(std::memory_order_acquire)) return false;
+        e = items_[r % kSize];
+        read_.store(r + 1, std::memory_order_release);
+        return true;
+    }
+private:
+    static constexpr uint32_t kSize = 1024;
+    UiEvent items_[kSize]{};
+    std::atomic<uint32_t> write_{0}, read_{0};
+};
+
+struct Plugin final : UiHost {
     clap_plugin_t clap{};
     const clap_host_t* host = nullptr;
     const clap_host_params_t* hostParams = nullptr;
@@ -36,17 +61,59 @@ struct Plugin {
     std::atomic<double> value[kParamCount];  // current values (main and audio thread)
     std::atomic<bool> sendAll{true};         // next batch reports every property as changed (creation, state load)
     std::atomic<bool> resetRequest{false};   // CLAP reset(): one batch with the Reset button down
+    std::atomic<double> mod[kParamCount];    // host modulation offsets (audio thread writes, GUI reads)
+    std::atomic<int> resetCounter{20000}, quiet{2000};
+    UiQueue uiEvents;
+    void* gui = nullptr;
 
     // audio thread
     double applied[kParamCount]{};
-    double mod[kParamCount]{};
     float carry[4][rpverb::kBatch]{};
     float prevOut[2][rpverb::kBatch]{};
     int fill = 0;
     double rate = 44100;
     bool playing = false;
 
-    Plugin() { for (int i = 0; i < kParamCount; i++) value[i].store(kParams[i].def, std::memory_order_relaxed); }
+    Plugin() {
+        for (int i = 0; i < kParamCount; i++) {
+            value[i].store(kParams[i].def, std::memory_order_relaxed);
+            mod[i].store(0, std::memory_order_relaxed);
+        }
+    }
+
+    // ---- UiHost (main thread)
+    double uiValue(int i) const override { return value[i].load(std::memory_order_relaxed); }
+    double uiMod(int i) const override { return mod[i].load(std::memory_order_relaxed); }
+    void requestFlush() { if (hostParams && hostParams->request_flush) hostParams->request_flush(host); }
+    void uiBegin(int i) override { uiEvents.push({CLAP_EVENT_PARAM_GESTURE_BEGIN, i, 0}); requestFlush(); }
+    void uiSet(int i, double v) override {
+        v = clampValue(i, v);
+        value[i].store(v, std::memory_order_relaxed);  // the device takes it at the next batch
+        uiEvents.push({CLAP_EVENT_PARAM_VALUE, i, v});
+        requestFlush();
+    }
+    void uiEnd(int i) override { uiEvents.push({CLAP_EVENT_PARAM_GESTURE_END, i, 0}); requestFlush(); }
+    int uiResetCounter() const override { return resetCounter.load(std::memory_order_relaxed); }
+    int uiQuietBatches() const override { return quiet.load(std::memory_order_relaxed); }
+
+    void emitUiEvents(const clap_output_events_t* out) {
+        UiEvent e;
+        while (uiEvents.pop(e)) {
+            if (!out) continue;
+            const clap_id id = kParams[e.index].id;
+            if (e.type == CLAP_EVENT_PARAM_VALUE) {
+                clap_event_param_value_t ev{};
+                ev.header = {sizeof ev, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0};
+                ev.param_id = id; ev.note_id = -1; ev.port_index = -1; ev.channel = -1; ev.key = -1; ev.value = e.value;
+                out->try_push(out, &ev.header);
+            } else {
+                clap_event_param_gesture_t ev{};
+                ev.header = {sizeof ev, 0, CLAP_CORE_EVENT_SPACE_ID, e.type, 0};
+                ev.param_id = id;
+                out->try_push(out, &ev.header);
+            }
+        }
+    }
 
     void handleEvent(const clap_event_header_t* h) {
         if (h->space_id != CLAP_CORE_EVENT_SPACE_ID) return;
@@ -57,7 +124,7 @@ struct Plugin {
         } else if (h->type == CLAP_EVENT_PARAM_MOD) {
             const auto* e = reinterpret_cast<const clap_event_param_mod_t*>(h);
             const int i = paramIndex(e->param_id);
-            if (i >= 0 && kParams[i].cv >= 0 && std::isfinite(e->amount)) mod[i] = e->amount;
+            if (i >= 0 && kParams[i].cv >= 0 && std::isfinite(e->amount)) mod[i].store(e->amount, std::memory_order_relaxed);
         }
     }
     static double clampValue(int i, double v) {
@@ -87,7 +154,11 @@ struct Plugin {
         const bool all = sendAll.exchange(false);
         for (int i = 0; i < kParamCount; i++) {
             const double v = value[i].load(std::memory_order_relaxed);
-            if (kParams[i].cv >= 0) { io.cv[kParams[i].cv] = mod[i]; io.cvConn[kParams[i].cv] = mod[i] != 0; }
+            if (kParams[i].cv >= 0) {
+                const double m = mod[i].load(std::memory_order_relaxed);
+                io.cv[kParams[i].cv] = m;
+                io.cvConn[kParams[i].cv] = m != 0;
+            }
             if (kParams[i].id == kIdSideInput) { applied[i] = v; continue; }
             if (!all && v == applied[i]) continue;
             applied[i] = v;
@@ -96,12 +167,15 @@ struct Plugin {
         }
         io.changes = changes;
         dev->render(io, tags, vals, n);
+        resetCounter.store(rpverb::I(dev->state(), 0x19c9b34), std::memory_order_relaxed);
+        quiet.store(rpverb::I(dev->state(), 0x1f48), std::memory_order_relaxed);
         if (io.outWritten) memcpy(prevOut, io.out, sizeof prevOut);
         else memset(prevOut, 0, sizeof prevOut);  // the original leaves the host buffer silent
     }
 
     void process(const clap_process_t* p) {
         const uint32_t frames = p->frames_count;
+        emitUiEvents(p->out_events);
         if (p->transport) playing = (p->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
         const float* in[4] = {nullptr, nullptr, nullptr, nullptr};
         if (p->audio_inputs_count > 0 && p->audio_inputs[0].data32) {
@@ -182,17 +256,7 @@ bool paramsValue(const clap_plugin_t* p, clap_id id, double* v) {
     return true;
 }
 bool paramsToText(const clap_plugin_t*, clap_id id, double v, char* out, uint32_t size) {
-    const int i = paramIndex(id);
-    if (i < 0 || !size) return false;
-    const ParamDef& d = kParams[i];
-    if (d.steps) {
-        const int k = int(std::floor(v + 0.5));
-        if (k < 0 || k >= d.steps) return false;
-        snprintf(out, size, "%s", d.labels[k]);
-    } else {
-        snprintf(out, size, "%.1f %%", v * 100.0);  // shortcut: percent; the original's display units are not recorded yet
-    }
-    return true;
+    return formatValue(paramIndex(id), v, out, size);
 }
 bool paramsFromText(const clap_plugin_t*, clap_id id, const char* text, double* v) {
     const int i = paramIndex(id);
@@ -208,8 +272,9 @@ bool paramsFromText(const clap_plugin_t*, clap_id id, const char* text, double* 
     *v = Plugin::clampValue(i, x / 100.0);
     return true;
 }
-void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*) {
+void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t* out) {
     Plugin* s = self(p);
+    s->emitUiEvents(out);
     const uint32_t n = in ? in->size(in) : 0;
     for (uint32_t k = 0; k < n; k++) s->handleEvent(in->get(in, k));
 }
@@ -280,6 +345,37 @@ bool remoteGet(const clap_plugin_t*, uint32_t index, clap_remote_controls_page_t
 }
 const clap_plugin_remote_controls_t kRemote = {remoteCount, remoteGet};
 
+// ---------------------------------------------------------------- gui (macOS)
+#ifdef __APPLE__
+bool guiSupported(const clap_plugin_t*, const char* api, bool floating) { return !floating && api && !strcmp(api, CLAP_WINDOW_API_COCOA); }
+bool guiPreferred(const clap_plugin_t*, const char** api, bool* floating) { *api = CLAP_WINDOW_API_COCOA; *floating = false; return true; }
+bool guiCreate(const clap_plugin_t* p, const char* api, bool floating) {
+    if (!guiSupported(p, api, floating)) return false;
+    Plugin* s = self(p);
+    if (s->gui) gui::destroy(s->gui);
+    s->gui = gui::create(*s);
+    return s->gui != nullptr;
+}
+void guiDestroy(const clap_plugin_t* p) { Plugin* s = self(p); if (s->gui) gui::destroy(s->gui); s->gui = nullptr; }
+bool guiSetScale(const clap_plugin_t*, double) { return false; }
+bool guiGetSize(const clap_plugin_t* p, uint32_t* w, uint32_t* h) { return gui::size(self(p)->gui, w, h); }
+bool guiCanResize(const clap_plugin_t*) { return false; }
+bool guiHints(const clap_plugin_t*, clap_gui_resize_hints_t*) { return false; }
+bool guiAdjust(const clap_plugin_t* p, uint32_t* w, uint32_t* h) { return gui::size(self(p)->gui, w, h); }
+bool guiSetSize(const clap_plugin_t* p, uint32_t w, uint32_t h) {
+    uint32_t cw, ch;
+    return gui::size(self(p)->gui, &cw, &ch) && cw == w && ch == h;
+}
+bool guiSetParent(const clap_plugin_t* p, const clap_window_t* w) { return w && gui::setParent(self(p)->gui, w->cocoa); }
+bool guiSetTransient(const clap_plugin_t*, const clap_window_t*) { return false; }
+void guiSuggestTitle(const clap_plugin_t*, const char*) {}
+bool guiShow(const clap_plugin_t* p) { return gui::show(self(p)->gui, true); }
+bool guiHide(const clap_plugin_t* p) { return gui::show(self(p)->gui, false); }
+const clap_plugin_gui_t kGui = {guiSupported, guiPreferred, guiCreate, guiDestroy, guiSetScale, guiGetSize,
+                                guiCanResize, guiHints, guiAdjust, guiSetSize, guiSetParent, guiSetTransient,
+                                guiSuggestTitle, guiShow, guiHide};
+#endif
+
 // ---------------------------------------------------------------- latency, tail
 uint32_t latencyGet(const clap_plugin_t*) { return kLatency; }
 const clap_plugin_latency_t kLatencyExt = {latencyGet};
@@ -293,7 +389,12 @@ bool pInit(const clap_plugin_t* p) {
     s->dev.reset(new (std::nothrow) rpverb::Device());
     return s->dev && s->dev->ok();
 }
-void pDestroy(const clap_plugin_t* p) { delete self(p); }
+void pDestroy(const clap_plugin_t* p) {
+#ifdef __APPLE__
+    guiDestroy(p);
+#endif
+    delete self(p);
+}
 bool pActivate(const clap_plugin_t* p, double rate, uint32_t, uint32_t) {
     if (!std::isfinite(rate) || rate < 1000 || rate > 768000) return false;
     Plugin* s = self(p);
@@ -323,6 +424,9 @@ const void* pExtension(const clap_plugin_t*, const char* id) {
     if (!strcmp(id, CLAP_EXT_STATE)) return &kState;
     if (!strcmp(id, CLAP_EXT_LATENCY)) return &kLatencyExt;
     if (!strcmp(id, CLAP_EXT_TAIL)) return &kTail;
+#ifdef __APPLE__
+    if (!strcmp(id, CLAP_EXT_GUI)) return &kGui;
+#endif
     if (!strcmp(id, CLAP_EXT_REMOTE_CONTROLS) || !strcmp(id, CLAP_EXT_REMOTE_CONTROLS_COMPAT)) return &kRemote;
     return nullptr;
 }
