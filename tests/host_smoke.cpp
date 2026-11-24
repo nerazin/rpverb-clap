@@ -1,6 +1,7 @@
 // Host smoke test: loads the built plugin through the CLAP C ABI like a host and checks descriptors,
 // parameters, state round trip, latency, and that its output equals a direct rpverb::Device run
 // (64-frame batches, 64 frames late, changes applied at the next batch) sample for sample.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -50,6 +51,26 @@ int main(int argc, char** argv) {
         if (info.flags & CLAP_PARAM_IS_STEPPED) CHECK(back == v);
     }
     CHECK(lat->get(p) == 64);
+
+    // remote-control pages: valid ids, named, and every parameter on at least one page
+    auto* remote = static_cast<const clap_plugin_remote_controls_t*>(p->get_extension(p, CLAP_EXT_REMOTE_CONTROLS));
+    CHECK(remote && remote->count(p) == uint32_t(rpverb_clap::kRemotePageCount));
+    CHECK(p->get_extension(p, CLAP_EXT_REMOTE_CONTROLS_COMPAT) == remote);
+    bool onPage[rpverb_clap::kParamCount] = {};
+    for (uint32_t k = 0; remote && k < remote->count(p); k++) {
+        clap_remote_controls_page_t page;
+        CHECK(remote->get(p, k, &page) && page.page_id == k && page.page_name[0] && !page.is_for_preset);
+        for (uint32_t s = 0; s < CLAP_REMOTE_CONTROLS_COUNT; s++) {
+            if (page.param_ids[s] == CLAP_INVALID_ID) continue;
+            const int i = rpverb_clap::paramIndex(page.param_ids[s]);
+            CHECK(i >= 0);
+            if (i >= 0) onPage[i] = true;
+        }
+    }
+    clap_remote_controls_page_t none;
+    CHECK(remote && !remote->get(p, remote->count(p), &none));
+    for (int i = 0; i < rpverb_clap::kParamCount; i++)
+        if (!onPage[i]) { fprintf(stderr, "not on a page: %s\n", rpverb_clap::kParams[i].name); fails++; }
 
     // state round trip with changed values
     Events ev; clap_input_events_t in{&ev, Events::size, Events::get};

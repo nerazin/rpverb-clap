@@ -15,6 +15,11 @@ Ensemble; Distortion; EQ; and the back panel's HQ Mode and Reset on Stop. "Side 
 in for plugging a cable into the back-panel side inputs: when on, the plugin's second stereo
 input drives the envelope.
 
+Seven remote-control pages put the panel on a host's 8-knob pages (Bitwig's device remote
+controls): Main (Dry/Wet, Space Type, Colour, Space Size, Reverb Length, Pre-Delay, Reverb Damping,
+Reverb Volume), Reverb, Early, Late & Ensemble, Envelope, Distortion & EQ, and Back Panel (Power,
+Side Input, HQ Mode, Reset on Stop, Reset, Dry/Wet). Every parameter is on at least one page.
+
 Host modulation of Dry/Wet, Ensemble Volume, Distortion Amount, Early Volume, Late Volume,
 Space Size, Reverb Length, Diffusion and Reverb Damping drives the matching CV input, as a CV
 cable does in Reason. Other parameters are automatable but not modulatable.
@@ -42,6 +47,7 @@ cable does in Reason. Other parameters are automatable but not modulatable.
 | Golden test (`tests/golden.cpp`), 2 x 6,000 batches, hashes measured on the original | x86-64 build: pass |
 | Same golden test, native arm64 build | different hashes: macOS libm (powf, sin, cos, log10) differs between arm64 and x86-64 |
 | Plugin output against a direct device run (`tests/host_smoke.cpp`), random block sizes and parameter moves | 0 samples differ |
+| Remote-control pages (`tests/host_smoke.cpp`): ids valid, every parameter reachable | pass |
 | Planted 1-ulp bug | caught by the function and device checks |
 
 The reference was the original x86-64 image driven by a fake host, not Reason itself.

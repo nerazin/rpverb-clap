@@ -265,6 +265,21 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* s) {
 }
 const clap_plugin_state_t kState = {stateSave, stateLoad};
 
+// ---------------------------------------------------------------- remote controls
+uint32_t remoteCount(const clap_plugin_t*) { return kRemotePageCount; }
+bool remoteGet(const clap_plugin_t*, uint32_t index, clap_remote_controls_page_t* page) {
+    if (!page || index >= uint32_t(kRemotePageCount)) return false;
+    memset(page, 0, sizeof *page);
+    snprintf(page->section_name, sizeof page->section_name, "%s", "RPVerb");
+    page->page_id = index;
+    snprintf(page->page_name, sizeof page->page_name, "%s", kRemotePages[index].name);
+    for (uint32_t i = 0; i < CLAP_REMOTE_CONTROLS_COUNT; i++)
+        page->param_ids[i] = kRemotePages[index].ids[i] == kNone ? CLAP_INVALID_ID : kRemotePages[index].ids[i];
+    page->is_for_preset = false;
+    return true;
+}
+const clap_plugin_remote_controls_t kRemote = {remoteCount, remoteGet};
+
 // ---------------------------------------------------------------- latency, tail
 uint32_t latencyGet(const clap_plugin_t*) { return kLatency; }
 const clap_plugin_latency_t kLatencyExt = {latencyGet};
@@ -308,6 +323,7 @@ const void* pExtension(const clap_plugin_t*, const char* id) {
     if (!strcmp(id, CLAP_EXT_STATE)) return &kState;
     if (!strcmp(id, CLAP_EXT_LATENCY)) return &kLatencyExt;
     if (!strcmp(id, CLAP_EXT_TAIL)) return &kTail;
+    if (!strcmp(id, CLAP_EXT_REMOTE_CONTROLS) || !strcmp(id, CLAP_EXT_REMOTE_CONTROLS_COMPAT)) return &kRemote;
     return nullptr;
 }
 void pMainThread(const clap_plugin_t*) {}

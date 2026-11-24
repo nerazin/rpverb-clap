@@ -84,6 +84,20 @@ inline const ParamDef kParams[] = {
 };
 constexpr int kParamCount = int(sizeof kParams / sizeof kParams[0]);
 
+// Remote-control pages (Bitwig's 8-knob pages), laid out like the panel. 0xffffffff: empty slot.
+constexpr uint32_t kNone = 0xffffffffu;
+struct RemotePage { const char* name; uint32_t ids[8]; };
+inline const RemotePage kRemotePages[] = {
+    {"Main", {8, 94, 95, 3, 4, 2, 5, 93}},                 // Dry/Wet, Space Type, Colour, Size, Length, Pre-Delay, Damping, Volume
+    {"Reverb", {54, 2, 13, 9, 49, 6, 7, 100}},             // on, Pre-Delay, its Disorder, Space Disorder, Diffusion, LP, HP, HQ
+    {"Early", {70, 73, 71, 72, 75, 74, 90, 92}},           // on, Volume, Routing, Length, Damping, Feedback, Side, Cross
+    {"Late & Ensemble", {83, 86, 84, 85, 87, 28, 30, 29}}, // Late on, Volume, Routing, Length, Damping; Ensemble on, Volume, Routing
+    {"Envelope", {37, 43, 48, 47, 44, 45, 46, 97}},        // on, Mode, Mono Input, Latch, Attack, Hold, Release, Amount
+    {"Distortion & EQ", {50, 53, 39, 40, 41, 42, 38, 8}},  // Distortion on, Amount; EQ on, Low, Mid, High, Post Audio; Dry/Wet
+    {"Back Panel", {kIdPower, kIdSideInput, 100, 105, kIdReset, 8, kNone, kNone}},
+};
+constexpr int kRemotePageCount = int(sizeof kRemotePages / sizeof kRemotePages[0]);
+
 inline int paramIndex(uint32_t id) {
     for (int i = 0; i < kParamCount; i++) if (kParams[i].id == id) return i;
     return -1;
