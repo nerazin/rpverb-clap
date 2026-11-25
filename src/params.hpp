@@ -30,11 +30,11 @@ inline const char* const kSpaces[] = {"Hall Clean", "Hall Cave", "Hall Swirl", "
 inline const char* const kColours[] = {"Clean", "Multi 01", "Multi 02", "Multi 03", "Swirl"};
 
 // Defaults are the original's init patch (presets/00_init in the lab). Dry/Wet is not saved in
-// patches: 0.5 here is unverified.
+// patches; 1.0 is what a new device shows in Reason ("Dry / Wet: 100%").
 inline const ParamDef kParams[] = {
     {kIdPower, "Power", "Global", 1, 3, kPower, -1},
     {kIdReset, "Reset", "Global", 0, 2, kOffOn, -1},
-    {8, "Dry/Wet", "Global", 0.5, 0, nullptr, 0},
+    {8, "Dry/Wet", "Global", 1.0, 0, nullptr, 0},
     {54, "Reverb", "Reverb", 1, 2, kOffOn, -1},
     {2, "Pre-Delay", "Reverb", 0.534999847412109375, 0, nullptr, -1},
     {13, "Pre-Delay Disorder", "Reverb", 0, 0, nullptr, -1},

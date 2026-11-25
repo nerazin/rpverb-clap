@@ -92,13 +92,41 @@ int main(int argc, char** argv) {
     params->get_value(p, 3, &v); CHECK(v == 0.25);
     params->get_value(p, 43, &v); CHECK(v == 4);
 
-    // processing against a direct device run
+    // processing against a direct device run; the transport plays for the first half, then stops
     CHECK(p->activate(p, 44100, 1, 512) && p->start_processing(p));
     rpverb::Device ref;
-    double cur[256]; bool pending = true;  // the plugin reports every property on its first batch
+    double cur[256];
     for (int i = 0; i < rpverb_clap::kParamCount; i++) cur[rpverb_clap::kParams[i].id] = rpverb_clap::kParams[i].def;
     cur[94] = 7; cur[3] = 0.25; cur[43] = 4;
     double applied[256]; memcpy(applied, cur, sizeof cur);
+    bool refPlaying = false;
+    // one batch as the plugin drives the device: the changed properties, plus Reason's burst at a stop
+    auto refBatch = [&](const float* l, const float* r, bool all, bool playing, float* oL, float* oR) {
+        rpverb::BatchIO io;
+        if (l) { memcpy(io.in[0], l, 256); memcpy(io.in[1], r, 256); }
+        io.conn[2] = io.conn[3] = false;
+        io.playing = playing;
+        io.space = cur[94]; io.colour = cur[95]; io.envelopeMode = cur[43];
+        std::vector<int> tags; std::vector<double> vals; int changes = 0;
+        for (int i = 0; i < rpverb_clap::kParamCount; i++) {
+            const uint32_t id = rpverb_clap::kParams[i].id;
+            if (id == rpverb_clap::kIdSideInput) continue;
+            if (!all && cur[id] == applied[id]) continue;
+            applied[id] = cur[id]; changes++;
+            if (id < 128) { tags.push_back(int(id)); vals.push_back(cur[id]); }
+        }
+        if (refPlaying && !playing) changes += 11;
+        refPlaying = playing;
+        io.changes = changes;
+        ref.render(io, tags.data(), vals.data(), int(tags.size()));
+        if (!io.outWritten) memset(io.out, 0, sizeof io.out);
+        if (oL) { memcpy(oL, io.out[0], 256); memcpy(oR, io.out[1], 256); }
+    };
+    // the plugin's start: every property twice, each reset finished on silence
+    for (int pass = 0; pass < 2; pass++) {
+        refBatch(nullptr, nullptr, true, false, nullptr, nullptr);
+        while (ref.resetPending()) refBatch(nullptr, nullptr, false, false, nullptr, nullptr);
+    }
     std::vector<float> inL, inR, outL, outR, refL, refR;
     uint64_t seed = 7;
     auto rnd = [&]() { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return double(seed >> 11) / 9007199254740992.0; };
@@ -115,6 +143,7 @@ int main(int argc, char** argv) {
     }
     std::sort(moves.begin(), moves.end(), [](auto& a, auto& b) { return a.first < b.first; });
     size_t mi = 0;
+    std::vector<int> callStart; std::vector<bool> callPlaying;
     for (int pos = 0; pos < total;) {
         const int n = std::min(total - pos, 1 + int(rnd() * 700));
         ev.v.clear();
@@ -124,31 +153,23 @@ int main(int argc, char** argv) {
         clap_output_events_t oe{nullptr, [](const clap_output_events_t*, const clap_event_header_t*) { return true; }};
         clap_process_t pr{}; pr.steady_time = -1; pr.frames_count = uint32_t(n); pr.audio_inputs = &ib; pr.audio_inputs_count = 1;
         pr.audio_outputs = &ob; pr.audio_outputs_count = 1; pr.in_events = &in; pr.out_events = &oe;
+        clap_event_transport_t tr{};
+        tr.header = {sizeof tr, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0};
+        tr.flags = pos < total / 2 ? CLAP_TRANSPORT_IS_PLAYING : 0;
+        pr.transport = &tr;
+        callStart.push_back(pos); callPlaying.push_back(pos < total / 2);
         CHECK(p->process(p, &pr) == CLAP_PROCESS_CONTINUE);
         pos += n;
     }
-    // reference: batch k sees every move at frames <= 64k+63
+    // reference: batch k sees every move at frames <= 64k+63, and the transport of the call that ends it
     mi = 0;
     refL.assign(64, 0.f); refR.assign(64, 0.f);
     for (int b = 0; b * 64 < total - 64; b++) {
         while (mi < moves.size() && moves[mi].first <= b * 64 + 63) { cur[moves[mi].second.first] = moves[mi].second.second; mi++; }
-        rpverb::BatchIO io;
-        memcpy(io.in[0], &inL[b * 64], 256); memcpy(io.in[1], &inR[b * 64], 256);
-        io.conn[2] = io.conn[3] = false;
-        io.space = cur[94]; io.colour = cur[95]; io.envelopeMode = cur[43];
-        std::vector<int> tags; std::vector<double> vals; int changes = 0;
-        for (int i = 0; i < rpverb_clap::kParamCount; i++) {
-            const uint32_t id = rpverb_clap::kParams[i].id;
-            if (id == rpverb_clap::kIdSideInput) continue;
-            if (!pending && cur[id] == applied[id]) continue;
-            applied[id] = cur[id]; changes++;
-            if (id < 128) { tags.push_back(int(id)); vals.push_back(cur[id]); }
-        }
-        pending = false;
-        io.changes = changes;
-        ref.render(io, tags.data(), vals.data(), int(tags.size()));
-        if (!io.outWritten) memset(io.out, 0, sizeof io.out);
-        refL.insert(refL.end(), io.out[0], io.out[0] + 64); refR.insert(refR.end(), io.out[1], io.out[1] + 64);
+        const size_t c = size_t(std::upper_bound(callStart.begin(), callStart.end(), b * 64 + 63) - callStart.begin()) - 1;
+        float oL[64], oR[64];
+        refBatch(&inL[b * 64], &inR[b * 64], false, callPlaying[c], oL, oR);
+        refL.insert(refL.end(), oL, oL + 64); refR.insert(refR.end(), oR, oR + 64);
     }
     long differ = 0; double energy = 0;
     for (int i = 0; i < total; i++) {
@@ -157,6 +178,10 @@ int main(int argc, char** argv) {
     }
     printf("process: %d frames, %zu moves, %ld samples differ from the direct device, output energy %.2f\n", total, moves.size(), differ, energy);
     CHECK(differ == 0 && energy > 1.0);
+    // "Reset on Stop" is on by default: the stop mutes the device until its reset clears the engine
+    double afterStop = 0;
+    for (int i = total / 2 + 64 * 32; i < total / 2 + 64 * 90; i++) afterStop = std::fmax(afterStop, std::fabs(outL[i]));
+    CHECK(afterStop < 1e-6);
     p->stop_processing(p); p->deactivate(p); p->destroy(p); entry->deinit();
     printf("%s\n", fails ? "host smoke FAILED" : "host smoke ok");
     return fails ? 1 : 0;

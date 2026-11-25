@@ -49,6 +49,8 @@ public:
     Device& operator=(const Device&) = delete;
     bool ok() const { return o_ != nullptr; }
     uint8_t* state() { return o_; }
+    // a reset sets the run counter to -32 and clears the engine about 100 batches later (muted until then)
+    bool resetPending() const { return I(o_, 0x19c9b34) <= 9998; }
 
     // property value as the host stores it; numbers arrive as double and are stored as float
     void setProperty(int tag, double v) {

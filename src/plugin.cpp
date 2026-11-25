@@ -165,12 +165,25 @@ struct Plugin final : UiHost {
             changes++;
             if (kParams[i].id < 128) { tags[n] = int(kParams[i].id); vals[n] = v; n++; }
         }
+        // Reason sends a burst of changes when its transport stops, and "Reset on Stop" works off it
+        // (measured in Reason: with it on the tail is cut at stop, with it off the tail rings on)
+        if (rpverb::U8(dev->state(), 0x1b39) && !playing) changes += 11;
         io.changes = changes;
         dev->render(io, tags, vals, n);
         resetCounter.store(rpverb::I(dev->state(), 0x19c9b34), std::memory_order_relaxed);
         quiet.store(rpverb::I(dev->state(), 0x1f48), std::memory_order_relaxed);
         if (io.outWritten) memcpy(prevOut, io.out, sizeof prevOut);
         else memset(prevOut, 0, sizeof prevOut);  // the original leaves the host buffer silent
+    }
+
+    // One batch on silence, then more until the reset it started has cleared the engine, so no input
+    // falls into the original's mute. Reason does the same before a device's first audio.
+    void settleBatch() {
+        memset(carry, 0, sizeof carry);
+        runBatch();
+        for (int k = 0; k < 1000 && dev->resetPending(); k++) runBatch();
+        fill = 0;
+        memset(prevOut, 0, sizeof prevOut);
     }
 
     void process(const clap_process_t* p) {
@@ -386,8 +399,7 @@ const clap_plugin_tail_t kTail = {tailGet};
 bool pInit(const clap_plugin_t* p) {
     Plugin* s = self(p);
     s->hostParams = static_cast<const clap_host_params_t*>(s->host->get_extension(s->host, CLAP_EXT_PARAMS));
-    s->dev.reset(new (std::nothrow) rpverb::Device());
-    return s->dev && s->dev->ok();
+    return true;
 }
 void pDestroy(const clap_plugin_t* p) {
 #ifdef __APPLE__
@@ -398,10 +410,17 @@ void pDestroy(const clap_plugin_t* p) {
 bool pActivate(const clap_plugin_t* p, double rate, uint32_t, uint32_t) {
     if (!std::isfinite(rate) || rate < 1000 || rate > 768000) return false;
     Plugin* s = self(p);
+    s->dev.reset();
+    s->dev.reset(new (std::nothrow) rpverb::Device());
+    if (!s->dev || !s->dev->ok()) { s->dev.reset(); return false; }
     s->rate = rate;
-    s->fill = 0;
-    memset(s->carry, 0, sizeof s->carry);
-    memset(s->prevOut, 0, sizeof s->prevOut);
+    s->playing = false;
+    // A fresh device, started as Reason starts one: every property arrives at creation and again from
+    // the patch, and both resets finish before the first audio (a Reason export matches this to 24 bits).
+    for (int pass = 0; pass < 2; pass++) {
+        s->sendAll.store(true);
+        s->settleBatch();
+    }
     return true;
 }
 void pDeactivate(const clap_plugin_t*) {}
@@ -409,10 +428,8 @@ bool pStartProcessing(const clap_plugin_t*) { return true; }
 void pStopProcessing(const clap_plugin_t*) {}
 void pReset(const clap_plugin_t* p) {
     Plugin* s = self(p);
-    s->fill = 0;
-    memset(s->carry, 0, sizeof s->carry);
-    memset(s->prevOut, 0, sizeof s->prevOut);
-    s->resetRequest.store(true);
+    s->resetRequest.store(true);  // the panel's Reset, finished at once
+    s->settleBatch();
 }
 clap_process_status pProcess(const clap_plugin_t* p, const clap_process_t* pr) {
     self(p)->process(pr);

@@ -2,8 +2,8 @@
 
 A CLAP reverb that reproduces the DSP of Rob Papen's RP-Verb RE 1.0.7 Rack Extension. The DSP was
 ported by hand from the Rack Extension's x86-64 code, operation by operation, and checked against
-the original binary running under Rosetta. Private project; not affiliated with Rob Papen or
-Reason Studios.
+the original binary (x86-64 under Rosetta, arm64 natively) and against audio rendered by Reason.
+Private project; not affiliated with Rob Papen or Reason Studios.
 
 ## Panel
 
@@ -41,9 +41,14 @@ cable does in Reason. Other parameters are automatable but not modulatable.
 
 - The device works in 64-frame batches, so the plugin has 64 frames of latency. Parameter
   changes take effect at the next batch.
-- Eleven or more parameter changes in one batch, a sample-rate change, the Reset control, and
-  the plugin's first batch start a mute-and-clear of about 96 batches (about 140 ms at 44.1 kHz)
-  during which the output, dry signal included, fades out.
+- Eleven or more parameter changes in one batch, a sample-rate change and the Reset control
+  start a mute-and-clear of about 96 batches (about 140 ms at 44.1 kHz) during which the output,
+  dry signal included, fades out and the input is ignored.
+- Activation starts a fresh device the way Reason starts one: every property arrives at creation
+  and again from the patch, and both resets finish before the first audio, so nothing is lost at
+  the start. A host `reset()` presses Reset and likewise finishes the clear at once.
+- When the host transport stops, the plugin passes on the burst of changes Reason sends at a
+  stop, so Reset on Stop (on by default) clears the reverb then; switched off, the tail rings on.
 - After 2000 batches of silent input and output the device stops processing until input returns.
 - The envelope buttons keep the original's wiring: "Space Size" modulates what the Reverb Length
   knob controls, "Reverb Length" modulates what the Space Size knob controls, and
@@ -56,26 +61,24 @@ cable does in Reason. Other parameters are automatable but not modulatable.
 | Check | Result |
 | --- | --- |
 | Every ported function against the original, same start state, all state words | 0 differ (42 functions, about 9,500 checks per 300-batch seed) |
-| Whole device against the original's render, outputs and the full 26 MB state each batch | 0 differ (8 seeds x 5,000 batches) |
-| Golden test (`tests/golden.cpp`), 2 x 6,000 batches, hashes measured on the original | x86-64 build: pass |
-| Same golden test, native arm64 build | different hashes: macOS libm (powf, sin, cos, log10) differs between arm64 and x86-64 |
+| Whole device against the original's render, outputs and the full 26 MB state each batch | 0 differ: x86-64, 8 seeds x 5,000 batches; arm64, 8 seeds x 5,000 batches |
+| Golden test (`tests/golden.cpp`), 2 x 6,000 batches, hashes measured on the original | pass on both: each build against the original's image for the same architecture (their libm differs) |
+| The plugin in a host against Reason 14: a noise burst through a new RP-Verb, exported to 24-bit WAV | within 1.25 LSB at 24 bits over the whole 199 s export (residual 106 dB below the signal) |
 | Plugin output against a direct device run (`tests/host_smoke.cpp`), random block sizes and parameter moves | 0 samples differ |
 | Remote-control pages (`tests/host_smoke.cpp`): ids valid, every parameter reachable | pass |
 | GUI opens through the CLAP gui extension and renders (`gui_snapshot` test) | pass |
 | Planted 1-ulp bug | caught by the function and device checks |
 
-The reference was the original x86-64 image driven by a fake host, not Reason itself.
+The function and device checks drive the original binary with a fake host; the Reason row is the
+real host. Reason renders an export from a fresh device, and a second export matched the first
+bit for bit.
 
 ## Not verified
 
-- No comparison with audio rendered by Reason.
-- The arm64 plugin against the original's arm64 build (no arm64 oracle yet). The arm64 build
-  uses no fused multiply-adds and imports the same four libm functions, so it is expected to
-  match, but this is not measured.
-- Dry/Wet's default (0.5 here) and the original's value display units: the original stores
-  neither in patches.
-- What Reason sends on the first batch after creating a device (modelled as every property
-  changing) and what an unconnected input buffer holds (modelled as whatever the host passes).
+- Only the default patch was rendered through Reason; other settings rely on the device checks.
+- What Reason sends at a transport start, a loop or a jump of the song position (modelled as
+  nothing), and what an unconnected input buffer holds (modelled as whatever the host passes).
+- The original's value display units (the plugin shows percent).
 - Not opened in a DAW yet: GUI gestures and automation recording in a host are untested.
 
 ## Build
